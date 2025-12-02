@@ -5,6 +5,7 @@
  * Uses Playwright to extract image URLs from the JavaScript-rendered page
  */
 
+import pLimit from 'p-limit';
 import { Downloader, DownloadContext, DownloadResult } from '../types.js';
 import { Page } from 'playwright';
 import { downloadMedia } from '../downloader.js';
@@ -129,21 +130,26 @@ export class GooglePhotosDownloader implements Downloader {
         return [{ status: 'failed', url, error: 'No media found in album after scrolling.' }];
       }
 
-      const results: DownloadResult[] = [];
-      for (let i = 0; i < mediaUrls.length; i++) {
-        const media = mediaUrls[i];
-        const filename = this.generateFilename(context, i, media.type);
-        const filePath = `${context.outputDir}/${filename}`;
+      console.log(`\n📥 Starting parallel download of ${mediaUrls.length} items (concurrency: 5)...`);
+      const limit = pLimit(5);
+      const downloadPromises = mediaUrls.map((media, i) => {
+        return limit(async () => {
+          const filename = this.generateFilename(context, i, media.type);
+          const filePath = `${context.outputDir}/${filename}`;
+          
+          console.log(`  [${i + 1}/${mediaUrls.length}] Downloading ${media.type}: ${filename}`);
+          const result = await downloadMedia(media.url, filePath, { maxRetries: 3, timeout: 45000 });
 
-        console.log(`Downloading ${media.type} ${i + 1}/${mediaUrls.length}...`);
-        const result = await downloadMedia(media.url, filePath, { maxRetries: 3, timeout: 45000 });
+          if (result.status === 'success') {
+            return { status: 'success' as const, url: media.url, localPath: filePath, filename, size: result.size, sourceAlbum: url };
+          } else {
+            console.log(`  ✗ [${i + 1}/${mediaUrls.length}] Failed to download ${filename}: ${result.error}`);
+            return { status: 'failed' as const, url: media.url, error: result.error, sourceAlbum: url };
+          }
+        });
+      });
 
-        if (result.status === 'success') {
-          results.push({ status: 'success', url: media.url, localPath: filePath, filename, size: result.size, sourceAlbum: url });
-        } else {
-          results.push({ status: 'failed', url: media.url, error: result.error, sourceAlbum: url });
-        }
-      }
+      const results = await Promise.all(downloadPromises);
       return results;
 
     } catch (error: any) {
