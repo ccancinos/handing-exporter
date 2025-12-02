@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Config with credentials (NEVER commit this!)
+config.json
+
+# Downloaded content
+output/
+
+# Manifest and logs (per-group manifests)
+manifest-*.json
+run_logs.json
+
+# Playwright
+.playwright/
+playwright-report/
+test-results/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
