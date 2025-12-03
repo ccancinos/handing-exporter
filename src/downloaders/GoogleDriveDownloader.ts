@@ -145,26 +145,103 @@ export class GoogleDriveDownloader implements Downloader {
   }
 
   private async extractFiles(page: Page): Promise<Array<{ url: string; name: string }>> {
-    const files = await page.evaluate(() => {
+    // Extract folder ID from URL to filter it out
+    const currentUrl = page.url();
+    const folderIdMatch = currentUrl.match(/folders\/([^/?]+)/);
+    const folderIdToExclude = folderIdMatch ? folderIdMatch[1] : null;
+
+    const files = await page.evaluate((folderId) => {
       const results: Array<{ url: string; name: string }> = [];
+      const seenIds = new Set<string>(); // Deduplication
 
-      // Google Drive uses data-id attributes on file items
-      const fileElements = document.querySelectorAll('[data-id]');
+      // STRATEGY 1: Try specific file item selectors (more reliable)
+      // Google Drive typically uses [data-id] on file rows in list view
+      const fileRows = document.querySelectorAll('[data-id][role="row"], [data-id][data-tooltip], [data-id].Q5txwe');
 
-      fileElements.forEach((el: any) => {
-        const fileId = el.dataset?.id;
-        const nameEl = el.querySelector('[data-tooltip]');
-        const name = nameEl?.textContent?.trim() || `file-${fileId}`;
+      fileRows.forEach((el: any) => {
+        const fileId = el.dataset?.id || el.getAttribute('data-id');
 
-        if (fileId) {
-          // Construct file URL
-          const url = `https://drive.google.com/file/d/${fileId}/view`;
-          results.push({ url, name });
+        // Inline validation (no helper function to avoid __name issue)
+        if (!fileId) return;
+        if (fileId.length < 10) return; // Too short
+        if (fileId === folderId) return; // Don't include folder itself
+        if (fileId.startsWith('_') || fileId.startsWith('-')) return; // System elements
+        if (fileId.includes(' ')) return; // Invalid character
+        if (!/^[a-zA-Z0-9_-]{10,50}$/.test(fileId)) return; // Pattern validation
+        if (seenIds.has(fileId)) return; // Already seen
+
+        // Try to extract name from various possible locations
+        let name = '';
+
+        // Try data-tooltip attribute (common in grid view)
+        const tooltipName = el.getAttribute('data-tooltip');
+        if (tooltipName && !tooltipName.includes('http')) {
+          name = tooltipName;
         }
+
+        // Try aria-label (accessible name)
+        if (!name) {
+          const ariaLabel = el.getAttribute('aria-label');
+          if (ariaLabel && !ariaLabel.includes('http')) {
+            name = ariaLabel;
+          }
+        }
+
+        // Try text content of specific child elements
+        if (!name) {
+          const nameEl = el.querySelector('[data-tooltip], .Q5txwe, [role="gridcell"] span');
+          const textContent = nameEl?.textContent?.trim();
+          if (textContent && textContent.length < 200 && !textContent.includes('http')) {
+            name = textContent;
+          }
+        }
+
+        // Use file ID as fallback only if we couldn't find a name
+        if (!name) {
+          name = `file-${fileId}`;
+        }
+
+        seenIds.add(fileId);
+        const url = `https://drive.google.com/file/d/${fileId}/view`;
+        results.push({ url, name });
       });
 
+      // STRATEGY 2: Fallback - generic [data-id] selector with strict filtering
+      if (results.length === 0) {
+        console.log('Fallback: Using generic [data-id] selector');
+        const allElements = document.querySelectorAll('[data-id]');
+
+        allElements.forEach((el: any) => {
+          const fileId = el.dataset?.id || el.getAttribute('data-id');
+
+          // Inline validation (no helper function to avoid __name issue)
+          if (!fileId) return;
+          if (fileId.length < 10) return; // Too short
+          if (fileId === folderId) return; // Don't include folder itself
+          if (fileId.startsWith('_') || fileId.startsWith('-')) return; // System elements
+          if (fileId.includes(' ')) return; // Invalid character
+          if (!/^[a-zA-Z0-9_-]{10,50}$/.test(fileId)) return; // Pattern validation
+          if (seenIds.has(fileId)) return; // Already seen
+
+          // Try to get name
+          const nameEl = el.querySelector('[data-tooltip]') || el;
+          const name = nameEl.getAttribute('data-tooltip') ||
+                      nameEl.getAttribute('aria-label') ||
+                      nameEl.textContent?.trim() ||
+                      `file-${fileId}`;
+
+          // Filter out names that look like system elements
+          if (name.length > 200 || name.includes('http')) return;
+
+          seenIds.add(fileId);
+          const url = `https://drive.google.com/file/d/${fileId}/view`;
+          results.push({ url, name });
+        });
+      }
+
+      console.log(`Extracted ${results.length} unique files after deduplication (raw elements: ${document.querySelectorAll('[data-id]').length})`);
       return results;
-    });
+    }, folderIdToExclude);
 
     return files;
   }
