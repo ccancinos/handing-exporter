@@ -16,6 +16,8 @@ export interface Post {
   title: string;
   url: string;
   author: string;
+  authorAvatar?: string;  // Avatar URL
+  authorRole?: string;    // Author's role in school community (e.g., "Maestra Celadora y Maestra de Inglés")
   timestamp: string;
   groupName: string;
   content: string;
@@ -30,6 +32,8 @@ export interface Post {
 
 export interface Comment {
   author: string;
+  authorAvatar?: string;  // Avatar URL
+  authorRole?: string;    // Author's role in school community (e.g., "Padre de Joaquin Berges (Sala de 5A)")
   timestamp: string;
   text: string;
   likes: number;
@@ -143,6 +147,7 @@ export interface MediaInfo {
 export interface Manifest {
   metadata: ManifestMetadata;
   posts: Record<string, ManifestPost>;
+  avatars?: Record<string, AvatarMetadata>;  // Track downloaded avatars
 }
 
 export interface ManifestMetadata {
@@ -162,4 +167,14 @@ export interface ManifestPost {
   external_links_count?: number;
   status: 'complete' | 'partial' | 'failed';
   error?: string;  // Error message if status is 'failed'
+}
+
+// Avatar metadata for manifest tracking
+export interface AvatarMetadata {
+  author: string;
+  url: string;
+  filename: string;
+  downloaded_at: string;
+  status: 'complete' | 'failed';
+  error?: string;
 }

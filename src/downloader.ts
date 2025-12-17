@@ -198,3 +198,95 @@ export function categorizeMedia(mediaUrls: any[]) {
 
   return { downloadable, external };
 }
+
+/**
+ * Download single avatar with retry logic
+ * @param {string} url - Avatar URL
+ * @param {string} filePath - Destination file path
+ * @param {number} retries - Number of retries
+ * @returns {Promise<Object>} Result with success status and optional error
+ */
+export async function downloadAvatar(
+  url: string,
+  filePath: string,
+  retries: number = 3
+): Promise<{ success: boolean; error?: string }> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Ensure directory exists
+      await mkdir(dirname(filePath), { recursive: true });
+
+      // Smaller timeout for avatars (usually small files)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      // Stream to file
+      const fileStream = createWriteStream(filePath);
+      await pipeline(response.body, fileStream);
+
+      return { success: true };
+
+    } catch (error: any) {
+      if (attempt === retries) {
+        return { success: false, error: error.message };
+      }
+      // Exponential backoff
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+    }
+  }
+
+  return { success: false, error: 'Max retries exceeded' };
+}
+
+/**
+ * Download multiple avatars in batch with deduplication
+ * @param {Array} avatars - Array of avatar objects with author, url, and filePath
+ * @param {number} concurrency - Number of concurrent downloads
+ * @returns {Promise<Map>} Map of author to download result
+ */
+export async function downloadAvatarsBatch(
+  avatars: Array<{ author: string; url: string; filePath: string }>,
+  concurrency: number = 5
+): Promise<Map<string, { success: boolean; filename: string; error?: string }>> {
+  const limit = pLimit(concurrency);
+  const results = new Map<string, { success: boolean; filename: string; error?: string }>();
+
+  // Deduplicate by author name
+  const uniqueAvatars = new Map<string, typeof avatars[0]>();
+  for (const avatar of avatars) {
+    if (!uniqueAvatars.has(avatar.author)) {
+      uniqueAvatars.set(avatar.author, avatar);
+    }
+  }
+
+  console.log(`  → Downloading ${uniqueAvatars.size} unique avatars...`);
+
+  const promises = Array.from(uniqueAvatars.values()).map((avatar) =>
+    limit(async () => {
+      const result = await downloadAvatar(avatar.url, avatar.filePath);
+      const filename = avatar.filePath.split('/').pop() || 'unknown.jpg';
+      results.set(avatar.author, {
+        success: result.success,
+        filename: filename,
+        error: result.error
+      });
+      return result;
+    })
+  );
+
+  await Promise.all(promises);
+
+  return results;
+}

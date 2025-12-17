@@ -153,9 +153,8 @@ export async function extractPostsFromTimeline(page, config) {
         const title = titleLink ? titleLink.textContent.trim() : '';
         const postUrl = titleLink ? titleLink.href : '';
 
-        // Extract author
-        const authorElement = block.querySelector('div.post-user a.text-navy');
-        const author = authorElement ? authorElement.textContent.trim() : 'Unknown';
+        // Author info will be extracted from individual post page
+        // (no need to extract from timeline since we always visit the full post)
 
         // Extract timestamp from title attribute (contains full date)
         const timestampElement = block.querySelector('small.created-at-timeline');
@@ -206,7 +205,7 @@ export async function extractPostsFromTimeline(page, config) {
           id: postId,
           title,
           url: postUrl,
-          author,
+          author: 'Unknown', // Will be extracted from individual post page
           timestamp,
           content,
           likes,
@@ -350,6 +349,22 @@ export async function extractFullPostDetails(page, post, config) {
       console.error(`     ✗ This post will have truncated content!`);
       throw new Error(`Content selector not found after 10s timeout`);
     }
+
+    // Extract all author information from individual post page (single source of truth)
+    // From the .media structure: <a class="user-name"><b>Author Name</b></a>
+    const authorName = await page.$eval('a.user-name b, a.user-name',
+      (el: any) => el.textContent.trim()
+    ).catch(() => 'Unknown');
+
+    // Avatar: <a class="forum-avatar"><img class="img-circle" src="..."></a>
+    const authorAvatar = await page.$eval('a.forum-avatar img.img-circle',
+      (img: any) => img.getAttribute('src')
+    ).catch(() => undefined);
+
+    // Role: <small>Maestra Celadora y Maestra de Inglés</small>
+    const authorRole = await page.$eval('.media-body .media-text .comment-text small',
+      (small: any) => small.textContent.trim()
+    ).catch(() => undefined);
 
     // Extract full content with HTML formatting (simplified to avoid tsx transpilation issues)
     const contentWithStyles = await page.evaluate(() => {
@@ -499,9 +514,12 @@ export async function extractFullPostDetails(page, post, config) {
     // Extract all comments with nested replies
     const comments = await extractComments(page).catch(() => []);
 
-    // Return enriched post object
+    // Return enriched post object with complete author information from individual post
     return {
       ...post,
+      author: authorName,       // Complete author info from individual post page
+      authorAvatar: authorAvatar,
+      authorRole: authorRole,
       content: contentWithStyles.html,
       contentStyles: contentWithStyles.css,
       images: media.length > 0 ? media : post.images, // Use full-size URLs if available
@@ -539,6 +557,32 @@ export async function extractComments(page) {
       const authorElement = commentElement.querySelector('a.text-navy');
       const author = authorElement ? authorElement.textContent.trim() : 'Unknown';
 
+      // Extract avatar (from actual DOM: a.forum-avatar img.img-circle.avatar-picture)
+      const avatarImg = commentElement.querySelector('a.forum-avatar img.img-circle.avatar-picture, a.forum-avatar img.img-circle');
+      const authorAvatar = avatarImg ? avatarImg.getAttribute('src') : undefined;
+
+      // Extract author role (text node in .media-heading after author link, before <br>)
+      const mediaHeading = commentElement.querySelector('.media-heading');
+      let authorRole = undefined;
+      if (mediaHeading) {
+        // Get all text nodes, skip the author link text, get text between link and <br>
+        const clone = mediaHeading.cloneNode(true) as HTMLElement;
+        // Remove the author link
+        const linkToRemove = clone.querySelector('a.text-navy');
+        if (linkToRemove) linkToRemove.remove();
+        // Remove the timestamp
+        const timeToRemove = clone.querySelector('small.created-at');
+        if (timeToRemove) timeToRemove.remove();
+        // Remove clearfix
+        const clearfixToRemove = clone.querySelector('.clearfix');
+        if (clearfixToRemove) clearfixToRemove.remove();
+        // Get remaining text (should be the role)
+        const roleText = clone.textContent?.trim().replace(/\s+/g, ' ');
+        if (roleText && roleText.length > 0) {
+          authorRole = roleText;
+        }
+      }
+
       // Extract timestamp
       const timestampElement = commentElement.querySelector('small.created-at-timeline');
       const timestamp = timestampElement ? timestampElement.getAttribute('title') || timestampElement.textContent.trim() : '';
@@ -558,13 +602,35 @@ export async function extractComments(page) {
         const replyElements = repliesContainer.querySelectorAll(':scope > div.comment');
         for (const replyElement of replyElements) {
           const replyAuthor = replyElement.querySelector('a.text-navy')?.textContent?.trim() || 'Unknown';
-          const replyTimestamp = replyElement.querySelector('small.created-at-timeline')?.getAttribute('title') ||
-                                 replyElement.querySelector('small.created-at-timeline')?.textContent?.trim() || '';
+          const replyAvatarImg = replyElement.querySelector('a.forum-avatar img.img-circle.avatar-picture, a.forum-avatar img.img-circle');
+          const replyAuthorAvatar = replyAvatarImg ? replyAvatarImg.getAttribute('src') : undefined;
+
+          // Extract reply author role (same logic as comment)
+          const replyMediaHeading = replyElement.querySelector('.media-heading');
+          let replyAuthorRole = undefined;
+          if (replyMediaHeading) {
+            const clone = replyMediaHeading.cloneNode(true) as HTMLElement;
+            const linkToRemove = clone.querySelector('a.text-navy');
+            if (linkToRemove) linkToRemove.remove();
+            const timeToRemove = clone.querySelector('small.created-at, small.created-at-timeline');
+            if (timeToRemove) timeToRemove.remove();
+            const clearfixToRemove = clone.querySelector('.clearfix');
+            if (clearfixToRemove) clearfixToRemove.remove();
+            const roleText = clone.textContent?.trim().replace(/\s+/g, ' ');
+            if (roleText && roleText.length > 0) {
+              replyAuthorRole = roleText;
+            }
+          }
+
+          const replyTimestamp = replyElement.querySelector('small.created-at-timeline, small.created-at')?.getAttribute('title') ||
+                                 replyElement.querySelector('small.created-at-timeline, small.created-at')?.textContent?.trim() || '';
           const replyText = replyElement.querySelector('.comment-text, .sanitized-post-content')?.textContent?.trim() || '';
           const replyLikes = parseInt(replyElement.querySelector('[data-likes]')?.getAttribute('data-likes') || '0', 10);
 
           replies.push({
             author: replyAuthor,
+            authorAvatar: replyAuthorAvatar,
+            authorRole: replyAuthorRole,
             timestamp: replyTimestamp,
             text: replyText,
             likes: replyLikes,
@@ -575,6 +641,8 @@ export async function extractComments(page) {
 
       topLevelComments.push({
         author,
+        authorAvatar,
+        authorRole,
         timestamp,
         text,
         likes,

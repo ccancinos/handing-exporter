@@ -15,7 +15,7 @@
 import chalk from 'chalk';
 import { writeFile } from 'fs/promises';
 import { loadConfig } from './config.js';
-import { loadManifest, saveManifest, updatePost, isPostComplete, getManifestStats } from './manifest.js';
+import { loadManifest, saveManifest, updatePost, isPostComplete, getManifestStats, hasAvatar, updateAvatar } from './manifest.js';
 import {
   initializeScraper,
   closeScraper,
@@ -32,9 +32,12 @@ import {
   getMediaFilePath,
   getExternalLinksFilePath,
   getExternalFilePath,
-  generateExternalFileFilename
+  generateExternalFileFilename,
+  createAvatarsDirectory,
+  getAvatarFilePath,
+  generateAvatarFilename
 } from './file-organizer.js';
-import { downloadMedia, downloadExternalLink } from './downloader.js';
+import { downloadMedia, downloadExternalLink, downloadAvatarsBatch } from './downloader.js';
 import { DownloaderFactory } from './downloaders/index.js';
 import {
   generatePostMarkdown,
@@ -98,6 +101,59 @@ async function main() {
       console.log(chalk.gray(`   Failed (will retry): ${stats.failed} posts`));
       console.log(chalk.gray(`   Remaining: ${posts.length - stats.complete} posts\n`));
 
+      // Phase 2.5: Collect and download post author avatars from timeline
+      console.log(chalk.blue(`\n   🖼️  Phase 2.5: Avatar Collection & Download\n`));
+
+      // Collect post author avatars from timeline (we have these already)
+      const authorsMap = new Map<string, string>(); // author -> avatarUrl
+      const year = new Date().getFullYear().toString();
+
+      for (const post of posts) {
+        if (post.authorAvatar && post.author) {
+          authorsMap.set(post.author, post.authorAvatar);
+        }
+      }
+
+      console.log(chalk.gray(`   Found ${authorsMap.size} unique post authors with avatars`));
+
+      // Filter out already downloaded avatars
+      const avatarsToDownload = [];
+      for (const [author, avatarUrl] of authorsMap.entries()) {
+        if (!hasAvatar(manifest, author)) {
+          const filename = generateAvatarFilename(author, avatarUrl);
+          const filePath = getAvatarFilePath(config.outputDir, group.name, year, filename);
+          avatarsToDownload.push({ author, url: avatarUrl, filePath });
+        }
+      }
+
+      if (avatarsToDownload.length > 0) {
+        console.log(chalk.gray(`   Downloading ${avatarsToDownload.length} new post author avatars...`));
+
+        // Create Avatars directory
+        await createAvatarsDirectory(config.outputDir, year, group.name);
+
+        // Download avatars in batch
+        const avatarResults = await downloadAvatarsBatch(avatarsToDownload, 5);
+
+        // Update manifest with results
+        for (const [author, result] of avatarResults.entries()) {
+          updateAvatar(manifest, author, {
+            url: authorsMap.get(author)!,
+            filename: result.filename,
+            status: result.success ? 'complete' : 'failed',
+            error: result.error
+          });
+        }
+
+        const successCount = Array.from(avatarResults.values()).filter(r => r.success).length;
+        console.log(chalk.green(`   ✓ Downloaded ${successCount}/${avatarsToDownload.length} post author avatars`));
+      } else {
+        console.log(chalk.gray(`   All post author avatars already downloaded`));
+      }
+
+      // Track comment avatars for later batch download
+      const commentAuthorsMap = new Map<string, string>(); // author -> avatarUrl
+
       // Phase 3-4 COMBINED: Streaming orchestration (enrich + download + generate immediately)
       console.log(chalk.blue(`\n   📝 Phase 3-4: Processing Posts (Streaming)...\n`));
 
@@ -140,6 +196,23 @@ async function main() {
           console.log(chalk.green(`      ✓ Extracted content (${enrichedPost.content?.length || 0} chars)`));
           console.log(chalk.gray(`      ✓ Found ${enrichedPost.comments?.length || 0} comments`));
           console.log(chalk.gray(`      ✓ Found ${enrichedPost.externalLinks?.length || 0} external links`));
+
+          // Collect comment avatars for batch download later
+          if (enrichedPost.comments) {
+            for (const comment of enrichedPost.comments) {
+              if (comment.authorAvatar && comment.author) {
+                commentAuthorsMap.set(comment.author, comment.authorAvatar);
+              }
+              // Also collect reply avatars
+              if (comment.replies) {
+                for (const reply of comment.replies) {
+                  if (reply.authorAvatar && reply.author) {
+                    commentAuthorsMap.set(reply.author, reply.authorAvatar);
+                  }
+                }
+              }
+            }
+          }
 
           // STEP 2: Download media and generate markdown
           console.log(chalk.gray(`      → Creating directories...`));
@@ -229,6 +302,7 @@ async function main() {
                   try {
                     const results = await downloader.download(link.url, {
                       outputDir: imagesDir,
+                      baseDir: config.outputDir,  // For getMediaFilePath calls
                       post: enrichedPost,
                       fileIndex: j,
                       page
@@ -311,11 +385,18 @@ async function main() {
 
           // STEP 3: Generate markdown files
           console.log(chalk.gray(`      → Generating markdown...`));
+
+          // Get avatar filename for post author
+          const avatarFilename = enrichedPost.authorAvatar
+            ? generateAvatarFilename(enrichedPost.author, enrichedPost.authorAvatar)
+            : null;
+
           const postMarkdownWithExternal = generatePostMarkdown(enrichedPost, {
             images: imageFilenames,
             videos: videoFilenames,
             downloadedExternalFiles,
-            galleryImages
+            galleryImages,
+            avatarFilename
           });
 
           const postFilename = generatePostFilename(enrichedPost) + '.md';
@@ -370,6 +451,44 @@ async function main() {
 
           // Continue to next post (don't crash)
           continue;
+        }
+      }
+
+      // Phase 4.5: Download comment avatars collected during processing
+      if (commentAuthorsMap.size > 0) {
+        console.log(chalk.blue(`\n   🖼️  Phase 4.5: Comment Avatar Download\n`));
+        console.log(chalk.gray(`   Found ${commentAuthorsMap.size} unique comment authors with avatars`));
+
+        // Filter out already downloaded avatars (including post authors we already downloaded)
+        const commentAvatarsToDownload = [];
+        for (const [author, avatarUrl] of commentAuthorsMap.entries()) {
+          if (!hasAvatar(manifest, author)) {
+            const filename = generateAvatarFilename(author, avatarUrl);
+            const filePath = getAvatarFilePath(config.outputDir, group.name, year, filename);
+            commentAvatarsToDownload.push({ author, url: avatarUrl, filePath });
+          }
+        }
+
+        if (commentAvatarsToDownload.length > 0) {
+          console.log(chalk.gray(`   Downloading ${commentAvatarsToDownload.length} new comment author avatars...`));
+
+          // Download avatars in batch
+          const commentAvatarResults = await downloadAvatarsBatch(commentAvatarsToDownload, 5);
+
+          // Update manifest with results
+          for (const [author, result] of commentAvatarResults.entries()) {
+            updateAvatar(manifest, author, {
+              url: commentAuthorsMap.get(author)!,
+              filename: result.filename,
+              status: result.success ? 'complete' : 'failed',
+              error: result.error
+            });
+          }
+
+          const commentSuccessCount = Array.from(commentAvatarResults.values()).filter(r => r.success).length;
+          console.log(chalk.green(`   ✓ Downloaded ${commentSuccessCount}/${commentAvatarsToDownload.length} comment author avatars`));
+        } else {
+          console.log(chalk.gray(`   All comment author avatars already downloaded`));
         }
       }
 

@@ -8,7 +8,8 @@
 import { Downloader } from '../types.js';
 import { DirectFileDownloader } from './DirectFileDownloader.js';
 import { GooglePhotosDownloader } from './GooglePhotosDownloader.js';
-import { GoogleDriveDownloader } from './GoogleDriveDownloader.js';
+import { GoogleDriveFileDownloader } from './GoogleDriveFileDownloader.js';
+import { GoogleDriveFolderDownloader } from './GoogleDriveFolderDownloader.js';
 import { Page } from 'playwright';
 
 export class DownloaderFactory {
@@ -16,8 +17,10 @@ export class DownloaderFactory {
 
   constructor(page?: Page) {
     // Register all downloaders
+    // Note: Order matters for priority when multiple can handle same URL
     this.registerDownloader(new GooglePhotosDownloader(page));
-    this.registerDownloader(new GoogleDriveDownloader(page));
+    this.registerDownloader(new GoogleDriveFolderDownloader(page));
+    this.registerDownloader(new GoogleDriveFileDownloader(page));
     this.registerDownloader(new DirectFileDownloader());
   }
 

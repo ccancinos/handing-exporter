@@ -6,6 +6,7 @@
 
 import { writeFile } from 'fs/promises';
 import { sanitizeFilename, parseTimestamp } from './utils.js';
+import { getRelativeAvatarPath, generateAvatarFilename, getRelativeMediaPath } from './file-organizer.js';
 
 /**
  * Generate markdown content for a post
@@ -20,6 +21,8 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     url,
     timestamp,
     author,
+    authorAvatar,
+    authorRole,
     groupName,
     likes,
     content,
@@ -28,7 +31,7 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     comments = []
   } = post;
 
-  const { images = [], videos = [], downloadedExternalFiles = [], galleryImages = [] } = mediaInfo;
+  const { images = [], videos = [], downloadedExternalFiles = [], galleryImages = [], avatarFilename = null } = mediaInfo;
 
   let markdown = '';
 
@@ -36,6 +39,13 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
   markdown += '---\n';
   markdown += `title: "${title || 'Untitled'}"\n`;
   markdown += `author: ${author}\n`;
+  if (authorRole) {
+    markdown += `author_role: "${authorRole}"\n`;
+  }
+  if (avatarFilename) {
+    const avatarPath = getRelativeAvatarPath(avatarFilename);
+    markdown += `author_avatar: ${avatarPath}\n`;
+  }
   markdown += `date: ${timestamp}\n`;
   markdown += `group: ${groupName}\n`;
   markdown += `post_id: "${id}"\n`;
@@ -44,6 +54,19 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
   markdown += `comments_count: ${comments.length}\n`;
   markdown += `has_external_links: ${externalLinks.length > 0}\n`;
   markdown += '---\n\n';
+
+  // Author avatar and title (after frontmatter, before title)
+  if (avatarFilename) {
+    const avatarPath = getRelativeAvatarPath(avatarFilename);
+    markdown += `![${author}](${avatarPath})\n\n`;
+  }
+
+  // Author name and role
+  markdown += `**${author}**`;
+  if (authorRole) {
+    markdown += `  \n*${authorRole}*`;
+  }
+  markdown += '\n\n';
 
   // Title
   if (title) {
@@ -70,7 +93,7 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     if (images.length > 0) {
       markdown += '### Post Images\n\n';
       for (let i = 0; i < images.length; i++) {
-        const relativePath = `../Images/${images[i]}`;
+        const relativePath = getRelativeMediaPath(images[i]);
         markdown += `![Image ${i + 1}](${relativePath})\n`;
       }
       markdown += '\n';
@@ -84,7 +107,7 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
         markdown += `**From: [${gallery.sourceName}](${gallery.sourceUrl})**\n\n`;
 
         for (let i = 0; i < gallery.images.length; i++) {
-          const relativePath = `../Images/${gallery.images[i]}`;
+          const relativePath = getRelativeMediaPath(gallery.images[i]);
           markdown += `![Gallery Image ${i + 1}](${relativePath})\n`;
         }
         markdown += '\n';
@@ -95,7 +118,7 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     if (videos.length > 0) {
       markdown += '### Videos\n\n';
       for (let i = 0; i < videos.length; i++) {
-        const relativePath = `../Videos/${videos[i]}`;
+        const relativePath = getRelativeMediaPath(videos[i]);
         markdown += `[Video ${i + 1}](${relativePath})\n\n`;
       }
     }
@@ -106,7 +129,7 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     markdown += `## Downloaded External Files (${downloadedExternalFiles.length})\n\n`;
 
     for (const file of downloadedExternalFiles) {
-      const relativePath = `../External_Files/${file.filename}`;
+      const relativePath = getRelativeMediaPath(file.filename);
       const fileName = file.name || file.url;
       markdown += `- [${fileName}](${relativePath})\n`;
     }
@@ -131,7 +154,22 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
     markdown += `## Comments (${comments.length})\n\n`;
 
     for (const comment of comments) {
-      markdown += `### ${comment.author}\n`;
+      // Add avatar inline with comment author
+      const commentAvatarPath = comment.authorAvatar
+        ? getRelativeAvatarPath(generateAvatarFilename(comment.author, comment.authorAvatar))
+        : null;
+
+      if (commentAvatarPath) {
+        markdown += `### ![Avatar](${commentAvatarPath}) ${comment.author}\n`;
+      } else {
+        markdown += `### ${comment.author}\n`;
+      }
+
+      // Add author role if available
+      if (comment.authorRole) {
+        markdown += `*${comment.authorRole}*\n\n`;
+      }
+
       markdown += `*${comment.timestamp}*\n\n`;
       markdown += `${comment.text}\n\n`;
 
@@ -144,7 +182,24 @@ export function generatePostMarkdown(post: any, mediaInfo: any = {}) {
       // Handle nested replies
       if (comment.replies && comment.replies.length > 0) {
         for (const reply of comment.replies) {
-          markdown += `**Reply by ${reply.author}** *${reply.timestamp}*\n\n`;
+          // Add avatar to reply
+          const replyAvatarPath = reply.authorAvatar
+            ? getRelativeAvatarPath(generateAvatarFilename(reply.author, reply.authorAvatar))
+            : null;
+
+          if (replyAvatarPath) {
+            markdown += `**Reply by ![Avatar](${replyAvatarPath}) ${reply.author}**`;
+          } else {
+            markdown += `**Reply by ${reply.author}**`;
+          }
+
+          // Add reply author role if available
+          if (reply.authorRole) {
+            markdown += ` *(${reply.authorRole})*`;
+          }
+
+          markdown += ` *${reply.timestamp}*\n\n`;
+
           markdown += `> ${reply.text}\n\n`;
           if (reply.likes > 0) {
             markdown += `> 👍 ${reply.likes} likes\n\n`;

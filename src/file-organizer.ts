@@ -73,14 +73,37 @@ export function getPostFilePath(baseDir, post, filename) {
 }
 
 /**
- * Generate file path for media
+ * Detect file type from filename extension
+ * @param {string} filename - Filename with extension
+ * @returns {'Images' | 'Videos' | 'External_Files'} Directory type
+ */
+function detectFileType(filename) {
+  if (!filename) return 'External_Files';
+
+  const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase();
+
+  const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic'];
+  const VIDEO_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp'];
+
+  if (IMAGE_EXTS.includes(ext)) return 'Images';
+  if (VIDEO_EXTS.includes(ext)) return 'Videos';
+  return 'External_Files';  // PDFs, docs, etc.
+}
+
+/**
+ * Generate file path for media (auto-detects type from extension if not specified)
  * @param {string} baseDir - Base output directory
  * @param {Object} post - Post data object
  * @param {string} filename - Media filename
- * @param {string} mediaType - 'Images' or 'Videos'
+ * @param {string} [mediaType] - Optional: 'Images', 'Videos', or 'External_Files'. Auto-detected if omitted.
  * @returns {string} Full file path
  */
 export function getMediaFilePath(baseDir, post, filename, mediaType) {
+  // Auto-detect mediaType from file extension if not provided
+  if (!mediaType && filename) {
+    mediaType = detectFileType(filename);
+  }
+
   const date = parseTimestamp(post.timestamp);
   const year = date.getFullYear();
   const month = getMonthName(date);
@@ -94,6 +117,28 @@ export function getMediaFilePath(baseDir, post, filename, mediaType) {
     mediaType,
     filename
   );
+}
+
+/**
+ * Get relative path for markdown references (auto-detects directory from filename)
+ * @param {string} filename - Filename with extension
+ * @returns {string} Relative path (e.g., '../Images/file.jpg' or '../Videos/video.mp4')
+ */
+export function getRelativeMediaPath(filename) {
+  const dirType = detectFileType(filename);
+  return `../${dirType}/${filename}`;
+}
+
+/**
+ * Generate file path for external files
+ * @deprecated Use getMediaFilePath() instead (auto-detects file type)
+ * @param {string} baseDir - Base output directory
+ * @param {Object} post - Post data object
+ * @param {string} filename - External file filename
+ * @returns {string} Full file path
+ */
+export function getExternalFilePath(baseDir, post, filename) {
+  return getMediaFilePath(baseDir, post, filename, 'External_Files');
 }
 
 /**
@@ -115,29 +160,6 @@ export function getExternalLinksFilePath(baseDir, post, filename) {
     post.groupName,
     month,
     'External_Links',
-    filename
-  );
-}
-
-/**
- * Generate file path for downloaded external file
- * @param {string} baseDir - Base output directory
- * @param {Object} post - Post data object
- * @param {string} filename - Downloaded external file filename
- * @returns {string} Full file path
- */
-export function getExternalFilePath(baseDir, post, filename) {
-  const date = parseTimestamp(post.timestamp);
-  const year = date.getFullYear();
-  const month = getMonthName(date);
-
-  return join(
-    baseDir,
-    String(year),
-    'Mis Grupos',
-    post.groupName,
-    month,
-    'External_Files',
     filename
   );
 }
@@ -300,16 +322,6 @@ export function generatePostFilename(post) {
 }
 
 /**
- * Get relative path from Messages folder to media file
- * @param {string} mediaType - 'Images' or 'Videos'
- * @param {string} filename - Media filename
- * @returns {string} Relative path
- */
-export function getRelativeMediaPath(mediaType, filename) {
-  return `../${mediaType}/${filename}`;
-}
-
-/**
  * Get relative path from Messages folder to external links file
  * @param {string} filename - External links filename
  * @returns {string} Relative path
@@ -357,4 +369,80 @@ export function groupPostsByMonth(posts) {
   }
 
   return grouped;
+}
+
+/**
+ * Create Avatars directory for a group
+ * @param {string} baseDir - Base output directory
+ * @param {string} year - Year (e.g., "2025")
+ * @param {string} groupName - Group name
+ * @returns {Promise<string>} Path to created Avatars directory
+ */
+export async function createAvatarsDirectory(baseDir: string, year: string, groupName: string): Promise<string> {
+  const avatarsPath = join(baseDir, String(year), 'Mis Grupos', groupName, 'Avatars');
+  await mkdir(avatarsPath, { recursive: true });
+  return avatarsPath;
+}
+
+/**
+ * Get avatar file path
+ * @param {string} baseDir - Base output directory
+ * @param {string} groupName - Group name
+ * @param {string} year - Year
+ * @param {string} filename - Avatar filename
+ * @returns {string} Full file path
+ */
+export function getAvatarFilePath(baseDir: string, groupName: string, year: string, filename: string): string {
+  return join(
+    baseDir,
+    String(year),
+    'Mis Grupos',
+    groupName,
+    'Avatars',
+    filename
+  );
+}
+
+/**
+ * Generate avatar filename from author name and URL
+ * @param {string} author - Author name
+ * @param {string} avatarUrl - Avatar URL
+ * @returns {string} Generated filename
+ */
+export function generateAvatarFilename(author: string, avatarUrl: string): string {
+  // Sanitize author name for filename
+  const sanitizedAuthor = sanitizeFilename(author)
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .substring(0, 50); // Limit length
+
+  // Extract extension from URL
+  const extension = getAvatarExtensionFromUrl(avatarUrl);
+
+  return `${sanitizedAuthor}.${extension}`;
+}
+
+/**
+ * Get relative path from Messages folder to Avatars
+ * @param {string} filename - Avatar filename
+ * @returns {string} Relative path (e.g., "../../Avatars/author-name.jpg")
+ */
+export function getRelativeAvatarPath(filename: string): string {
+  return `../../Avatars/${filename}`;
+}
+
+/**
+ * Extract file extension from avatar URL
+ * @param {string} url - Avatar URL
+ * @returns {string} File extension
+ */
+function getAvatarExtensionFromUrl(url: string): string {
+  // Try to extract from URL
+  const match = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+  if (match) {
+    return match[1].toLowerCase();
+  }
+
+  // Default to jpg for avatars
+  return 'jpg';
 }

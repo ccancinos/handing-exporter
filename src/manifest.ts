@@ -65,9 +65,10 @@ function createEmptyManifest(groupName) {
       created_at: new Date().toISOString(),
       last_run: null,
       total_posts: 0,
-      version: '1.0.0'
+      version: '1.1.0'  // Bumped for avatar support
     },
-    posts: {}
+    posts: {},
+    avatars: {}  // Track downloaded avatars
   };
 }
 
@@ -175,4 +176,58 @@ export function getManifestStats(manifest: any) {
     failed: posts.filter(p => p.status === 'failed').length,
     partial: posts.filter(p => p.status === 'partial').length
   };
+}
+
+/**
+ * Check if avatar already downloaded
+ * @param {Object} manifest - Manifest object
+ * @param {string} author - Author name
+ * @returns {boolean} True if avatar is complete
+ */
+export function hasAvatar(manifest: any, author: string): boolean {
+  return manifest.avatars && manifest.avatars[author]?.status === 'complete';
+}
+
+/**
+ * Update avatar in manifest
+ * @param {Object} manifest - Manifest object
+ * @param {string} author - Author name
+ * @param {Object} avatarData - Avatar data (url, filename, status, error)
+ */
+export function updateAvatar(
+  manifest: any,
+  author: string,
+  avatarData: { url: string; filename: string; status: 'complete' | 'failed'; error?: string }
+): void {
+  if (!manifest.avatars) {
+    manifest.avatars = {};
+  }
+
+  manifest.avatars[author] = {
+    author,
+    url: avatarData.url,
+    filename: avatarData.filename,
+    downloaded_at: new Date().toISOString(),
+    status: avatarData.status,
+    error: avatarData.error
+  };
+}
+
+/**
+ * Get failed avatars for retry
+ * @param {Object} manifest - Manifest object
+ * @returns {Array} Array of failed avatar objects
+ */
+export function getFailedAvatars(manifest: any): Array<{ author: string; url: string; filename: string }> {
+  if (!manifest.avatars) {
+    return [];
+  }
+
+  return Object.values(manifest.avatars)
+    .filter((avatar: any) => avatar.status === 'failed')
+    .map((avatar: any) => ({
+      author: avatar.author,
+      url: avatar.url,
+      filename: avatar.filename
+    }));
 }

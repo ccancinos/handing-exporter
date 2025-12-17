@@ -1,16 +1,17 @@
 /**
- * Google Drive Downloader
+ * Google Drive Folder Downloader
  *
  * Handles downloading files from Google Drive folder links
- * Uses Playwright to extract file URLs from the JavaScript-rendered page
+ * Folders typically contain images/videos and are saved to Images directory
+ * Downloads files directly using file IDs without visiting individual file pages
  */
 
 import { Downloader, DownloadContext, DownloadResult } from '../types.js';
 import { Page } from 'playwright';
-import { downloadMedia } from '../downloader.js';
 import { sleep, parseTimestamp } from '../utils.js';
+import { getMediaFilePath } from '../file-organizer.js';
 
-export class GoogleDriveDownloader implements Downloader {
+export class GoogleDriveFolderDownloader implements Downloader {
   private page: Page | null = null;
 
   constructor(page?: Page) {
@@ -22,7 +23,8 @@ export class GoogleDriveDownloader implements Downloader {
   }
 
   canHandle(url: string): boolean {
-    return url.includes('drive.google.com/drive/folders');
+    return url.includes('drive.google.com/drive/folders') ||
+           url.includes('drive.google.com/drive/u/');
   }
 
   getPriority(): number {
@@ -35,7 +37,7 @@ export class GoogleDriveDownloader implements Downloader {
       return [{
         status: 'failed',
         url,
-        error: 'No Playwright page provided to GoogleDriveDownloader'
+        error: 'No Playwright page provided to GoogleDriveFolderDownloader'
       }];
     }
 
@@ -64,40 +66,75 @@ export class GoogleDriveDownloader implements Downloader {
         }];
       }
 
-      // Download each file
+      // Download each file directly using file ID (no need to visit individual pages)
       const results: DownloadResult[] = [];
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const filename = this.generateFilename(context, i, file.name);
-        const filePath = `${context.outputDir}/${filename}`;
-
         console.log(`Downloading file ${i + 1}/${files.length}: ${file.name}...`);
 
-        // Convert Drive viewer URL to download URL
-        const downloadUrl = this.getDirectDownloadUrl(file.url);
-
-        const result = await downloadMedia(downloadUrl, filePath, {
-          maxRetries: 3,
-          timeout: 30000
-        });
-
-        if (result.status === 'success') {
-          results.push({
-            status: 'success',
-            url: file.url,
-            localPath: filePath,
-            filename,
-            size: result.size,
-            sourceName: file.name,
-            sourceFolder: url
-          });
-        } else {
+        // Extract file ID from URL
+        const fileIdMatch = file.url.match(/\/d\/([^\/\?]+)/);
+        if (!fileIdMatch) {
+          console.log(`  ✗ Could not extract file ID from URL: ${file.url}`);
           results.push({
             status: 'failed',
             url: file.url,
-            error: result.error,
-            sourceName: file.name,
-            sourceFolder: url
+            error: 'Could not extract file ID from URL'
+          });
+          continue;
+        }
+        const fileId = fileIdMatch[1];
+
+        // Generate filename with timestamp
+        const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 100);
+        const date = parseTimestamp(context.post.timestamp);
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hour = String(date.getHours()).padStart(2, '0');
+        const minute = String(date.getMinutes()).padStart(2, '0');
+        const timestamp = `${month}-${day}-${hour}-${minute}`;
+        const filename = `${timestamp}-drive-${i + 1}-${sanitizedName}`;
+
+        // Use getMediaFilePath to auto-route based on file extension
+        const baseDir = context.baseDir || context.outputDir;
+        const filePath = getMediaFilePath(baseDir, context.post, filename);
+
+        // Construct direct download URL
+        const directDownloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0&confirm=t`;
+
+        try {
+          // Use Playwright's authenticated request context
+          const response = await this.page!.request.get(directDownloadUrl);
+
+          if (response.ok()) {
+            // Save the file
+            const fs = await import('fs/promises');
+            const buffer = await response.body();
+            await fs.writeFile(filePath, buffer);
+
+            // Get file size
+            const stats = await fs.stat(filePath);
+            const fileSize = stats.size;
+
+            console.log(`  ✓ Downloaded: ${filename} (${this.formatBytes(fileSize)})`);
+
+            results.push({
+              status: 'success',
+              url: file.url,
+              localPath: filePath,
+              filename,
+              size: fileSize,
+              sourceName: file.name
+            });
+          } else {
+            throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);
+          }
+        } catch (error: any) {
+          console.log(`  ✗ Failed to download ${file.name}: ${error.message}`);
+          results.push({
+            status: 'failed',
+            url: file.url,
+            error: error.message
           });
         }
       }
@@ -112,6 +149,14 @@ export class GoogleDriveDownloader implements Downloader {
         error: error.message
       }];
     }
+  }
+
+  private formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   }
 
   private async scrollToLoadAll(page: Page) {
@@ -244,33 +289,5 @@ export class GoogleDriveDownloader implements Downloader {
     }, folderIdToExclude);
 
     return files;
-  }
-
-  private getDirectDownloadUrl(driveUrl: string): string {
-    // Convert viewer URL to direct download URL
-    const match = driveUrl.match(/\/d\/([^\/]+)\//);
-    if (match) {
-      const fileId = match[1];
-      return `https://drive.google.com/uc?export=download&id=${fileId}`;
-    }
-    return driveUrl;
-  }
-
-  private generateFilename(context: DownloadContext, index: number, originalName: string): string {
-    const { post } = context;
-
-    // Parse timestamp from post (Spanish format: "DD de MMMM YYYY, HH:MM")
-    const date = parseTimestamp(post.timestamp);
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hour = String(date.getHours()).padStart(2, '0');
-    const minute = String(date.getMinutes()).padStart(2, '0');
-
-    const timestamp = `${month}-${day}-${hour}-${minute}`;
-
-    // Sanitize original filename
-    const sanitized = originalName.replace(/[^a-zA-Z0-9.-]/g, '-');
-
-    return `${timestamp}-drive-${index + 1}-${sanitized}`;
   }
 }
