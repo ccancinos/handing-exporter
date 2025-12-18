@@ -61,7 +61,7 @@ async function main() {
 
     // Initialize Playwright browser
     console.log(chalk.gray('Initializing browser...'));
-    const { browser, page } = await initializeScraper(config);
+    const { browser, page, context } = await initializeScraper(config);
 
     // Authenticate
     console.log(chalk.blue('\n🔐 Authenticating...\n'));
@@ -83,8 +83,8 @@ async function main() {
       // Navigate to group timeline
       await navigateToGroup(page, group);
 
-      // Extract all posts with pagination (Phase 1 + 2)
-      const posts = await extractAllPosts(page, config, group.url);
+      // Extract all posts with pagination (Phase 1 + 2) - now with parallel extraction
+      const posts = await extractAllPosts(page, context, config, group.url);
 
       // Add groupName to each post
       posts.forEach(post => {

@@ -240,72 +240,146 @@ export async function hasMorePages(page) {
 }
 
 /**
+ * Extract posts from a single timeline page
+ * @param {BrowserContext} context - Playwright browser context for creating new pages
+ * @param {string} groupUrl - Base group URL
+ * @param {number} pageNumber - Page number to extract
+ * @param {Object} config - Configuration object
+ * @returns {Promise<Array>} Array of post objects from this page
+ */
+async function extractSinglePage(context, groupUrl, pageNumber, config) {
+  const page = await context.newPage();
+
+  try {
+    // Construct page URL
+    const pageUrl = pageNumber === 1 ? groupUrl : `${groupUrl}?page=${pageNumber}`;
+
+    // Navigate to page
+    await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+    // Wait for timeline blocks
+    await page.waitForSelector('div.vertical-timeline-block', { timeout: 15000 });
+
+    // Small delay for content to settle
+    await page.waitForTimeout(config.scraping.scrollDelay || 1000);
+
+    // Extract posts
+    const posts = await extractPostsFromTimeline(page, config);
+
+    return posts;
+  } catch (error) {
+    // Check if page is empty
+    try {
+      const isEmpty = await page.$eval('body', (body) => {
+        return body.textContent.includes('Aún sin novedades') ||
+               body.textContent.includes('sin novedades');
+      }).catch(() => false);
+
+      if (isEmpty) {
+        return []; // Empty page, return empty array
+      }
+    } catch (e) {
+      // Ignore check errors
+    }
+
+    console.error(`  ⚠ Error extracting page ${pageNumber}:`, error.message);
+    return []; // Return empty on error
+  } finally {
+    await page.close();
+  }
+}
+
+/**
  * Extract all posts from group timeline with pagination
  * @param {Page} page - Playwright page instance
+ * @param {BrowserContext} context - Playwright browser context for parallel page extraction
  * @param {Object} config - Configuration object
  * @param {string} groupUrl - Base group URL
  * @returns {Promise<Array>} Array of all post objects from all pages
  */
-export async function extractAllPosts(page, config, groupUrl) {
-  const allPosts = [];
-  let pageNumber = 1;
-  let continueLooping = true;
+export async function extractAllPosts(page, context, config, groupUrl) {
+  console.log('  → Starting pagination with parallel extraction...');
 
-  console.log('  → Starting pagination...');
+  // Phase 1: Extract page 1 to check if pagination exists
+  console.log('  → Extracting page 1...');
+  const page1Posts = await extractPostsFromTimeline(page, config);
+  console.log(`     Found ${page1Posts.length} posts on page 1`);
 
-  while (continueLooping) {
-    console.log(`  → Extracting page ${pageNumber}...`);
+  const allPosts = [...page1Posts];
 
-    // Extract posts from current page
-    const posts = await extractPostsFromTimeline(page, config);
-    allPosts.push(...posts);
+  // Check if there are more pages
+  const hasPagination = await hasMorePages(page);
 
-    console.log(`     Found ${posts.length} posts on page ${pageNumber}`);
-
-    // Check if there are more pages
-    const morePages = await hasMorePages(page);
-
-    if (morePages) {
-      pageNumber++;
-
-      // Construct the next page URL by adding ?page=N parameter
-      const nextPageUrl = `${groupUrl}?page=${pageNumber}`;
-      console.log(`  → Navigating to page ${pageNumber}... ${nextPageUrl}`);
-
-      await page.goto(nextPageUrl, {
-        waitUntil: 'networkidle'
-      });
-
-      // Try to wait for timeline to load
-      try {
-        await page.waitForSelector('div.vertical-timeline-block', {
-          timeout: 15000
-        });
-
-        // Small delay to ensure content is fully loaded
-        await page.waitForTimeout(config.scraping.scrollDelay || 1000);
-      } catch (error) {
-        // Timeline blocks not found - check if page is empty
-        const isEmpty = await page.$eval('body', (body) => {
-          return body.textContent.includes('Aún sin novedades') ||
-                 body.textContent.includes('sin novedades');
-        }).catch(() => false);
-
-        if (isEmpty) {
-          console.log('  ✓ Reached empty page, pagination complete');
-          continueLooping = false;
-        } else {
-          // Unexpected error - re-throw
-          throw error;
-        }
-      }
-    } else {
-      continueLooping = false;
-      console.log('  ✓ No more pages, pagination complete');
-    }
+  if (!hasPagination) {
+    console.log('  ✓ No more pages, pagination complete');
+    console.log(`  ✓ Total posts extracted: ${allPosts.length} from 1 page`);
+    return allPosts;
   }
 
-  console.log(`  ✓ Total posts extracted: ${allPosts.length} from ${pageNumber} page(s)`);
+  // Phase 2: Parallel extraction of remaining pages in batches
+  console.log('  → Multiple pages detected, using parallel batch extraction...');
+
+  const BATCH_SIZE = 10; // Process 10 pages concurrently
+  const MAX_PAGES = 500; // Safety limit (stop if we exceed this)
+  let currentPage = 2;
+  let consecutiveEmptyBatches = 0;
+  let totalPagesExtracted = 1;
+
+  while (currentPage <= MAX_PAGES) {
+    // Create batch of page numbers
+    const batchPageNumbers = Array.from(
+      { length: BATCH_SIZE },
+      (_, i) => currentPage + i
+    );
+
+    console.log(`  → Extracting pages ${batchPageNumbers[0]}-${batchPageNumbers[batchPageNumbers.length - 1]} in parallel...`);
+
+    // Extract all pages in batch concurrently
+    const batchPromises = batchPageNumbers.map(pageNum =>
+      extractSinglePage(context, groupUrl, pageNum, config)
+    );
+
+    const batchResults = await Promise.all(batchPromises);
+
+    // Process results
+    let postsFoundInBatch = 0;
+    let emptyPagesInBatch = 0;
+
+    batchResults.forEach((posts, idx) => {
+      const pageNum = batchPageNumbers[idx];
+      if (posts.length > 0) {
+        allPosts.push(...posts);
+        postsFoundInBatch += posts.length;
+        totalPagesExtracted++;
+        console.log(`     Page ${pageNum}: ${posts.length} posts`);
+      } else {
+        emptyPagesInBatch++;
+      }
+    });
+
+    console.log(`     Batch total: ${postsFoundInBatch} posts from ${BATCH_SIZE - emptyPagesInBatch} pages`);
+
+    // Stop if entire batch was empty
+    if (emptyPagesInBatch === BATCH_SIZE) {
+      consecutiveEmptyBatches++;
+      if (consecutiveEmptyBatches >= 1) {
+        console.log('  ✓ Reached end of timeline (empty batch detected)');
+        break;
+      }
+    } else {
+      consecutiveEmptyBatches = 0;
+    }
+
+    // Stop if we found any empty pages (likely near the end)
+    if (emptyPagesInBatch > 0) {
+      console.log('  ✓ Reached end of timeline (partial empty batch)');
+      break;
+    }
+
+    currentPage += BATCH_SIZE;
+  }
+
+  console.log(`  ✓ Total posts extracted: ${allPosts.length} from ${totalPagesExtracted} page(s)`);
   return allPosts;
 }
 
