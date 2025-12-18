@@ -24,7 +24,7 @@ import {
   getAvatarFilePath,
   getRelativeAvatarPath
 } from './file-organizer.js';
-import { downloadMedia, downloadExternalLink, downloadAvatar } from './downloader.js';
+import { downloadMedia, downloadExternalLink, downloadAvatar, downloadMediaBatch } from './downloader.js';
 import { generatePostMarkdown, writeMarkdownFile } from './markdown-writer.js';
 
 async function testSinglePost() {
@@ -147,21 +147,27 @@ async function testSinglePost() {
     const galleryImages = [];
 
     if (enrichedPost.images && enrichedPost.images.length > 0) {
-      console.log(chalk.blue(`📥 Step 3: Downloading ${enrichedPost.images.length} images...\n`));
-      for (let i = 0; i < enrichedPost.images.length; i++) {
-        const imageUrl = enrichedPost.images[i];
-        const filename = generateMediaFilename(enrichedPost, imageUrl, 'image', i);
-        const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename);
+      console.log(chalk.blue(`📥 Step 3: Downloading ${enrichedPost.images.length} images/videos in parallel...\n`));
 
-        console.log(chalk.gray(`  [${i + 1}/${enrichedPost.images.length}] ${imageUrl.substring(0, 80)}...`));
-        const result = await downloadMedia(imageUrl, filePath);
+      // Prepare batch download items
+      const mediaBatchItems = enrichedPost.images.map((url, i) => {
+        const filename = generateMediaFilename(enrichedPost, url, 'image', i);
+        const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename);
+        return { url, filePath, filename };
+      });
+
+      // Download in parallel
+      const mediaResults = await downloadMediaBatch(mediaBatchItems, { concurrency: 5 });
+
+      // Process results
+      mediaResults.forEach((result, i) => {
         if (result.status === 'success') {
-          imageFilenames.push(filename);
-          console.log(chalk.green(`    ✓ Saved: ${filename}`));
+          imageFilenames.push(mediaBatchItems[i].filename);
+          console.log(chalk.green(`  ✓ [${i + 1}/${enrichedPost.images.length}] Saved: ${mediaBatchItems[i].filename}`));
         } else {
-          console.log(chalk.red(`    ✗ Failed: ${result.error}`));
+          console.log(chalk.red(`  ✗ [${i + 1}/${enrichedPost.images.length}] Failed: ${result.error}`));
         }
-      }
+      });
     }
 
     // Download external links / galleries
@@ -257,40 +263,49 @@ async function testSinglePost() {
           }
         }
 
-        // Fallback to direct download
-        if (!downloadSuccessful) {
+        // Check if no downloader can handle this URL (filtered out as non-downloadable)
+        if (!downloader) {
+          console.log(chalk.yellow('\n  ⚠ Non-downloadable URL (web page, form, etc.) - skipping'));
+          failedExternalLinks.push(link);
+          continue;
+        }
+
+        // Try direct file download (DirectFileDownloader with priority 0)
+        if (!downloadSuccessful && downloader.getPriority() === 0) {
           console.log(chalk.gray('\n  → Trying direct download...'));
 
-          const tempFilename = generateExternalFileFilename(enrichedPost, link, i, 'tmp');
-          const tempFilePath = getMediaFilePath(config.outputDir, enrichedPost, tempFilename);
-
-          const result = await downloadExternalLink(link.url, tempFilePath, { timeout: 40000 });
-
-          if (result.status === 'success') {
-            const finalFilename = generateExternalFileFilename(enrichedPost, link, i, result.extension);
-            const finalFilePath = getMediaFilePath(config.outputDir, enrichedPost, finalFilename);
-
-            if (finalFilename !== tempFilename) {
-              const fs = await import('fs/promises');
-              await fs.rename(tempFilePath, finalFilePath);
-            }
-
-            downloadedExternalFiles.push({
-              name: link.name,
-              url: link.url,
-              filename: finalFilename
+          try {
+            const results = await downloader.download(link.url, {
+              outputDir: config.outputDir,
+              baseDir: config.outputDir,
+              post: enrichedPost,
+              fileIndex: i,
+              linkName: link.name,
+              page
             });
 
-            console.log(chalk.green(`  ✓ Direct download: ${finalFilename}`));
-            downloadSuccessful = true;
-          } else {
-            console.log(chalk.red(`  ✗ Direct download failed: ${result.error}`));
+            if (results.length > 0 && results[0].status === 'success') {
+              const result = results[0];
+              downloadedExternalFiles.push({
+                name: link.name,
+                url: link.url,
+                filename: result.filename
+              });
+
+              console.log(chalk.green(`  ✓ Direct download: ${result.filename}`));
+              downloadSuccessful = true;
+            } else if (results.length > 0) {
+              console.log(chalk.red(`  ✗ Direct download failed: ${results[0].error}`));
+            }
+          } catch (error: any) {
+            console.log(chalk.red(`  ✗ Direct download error: ${error.message}`));
           }
         }
 
+        // Mark as failed if all methods failed
         if (!downloadSuccessful) {
+          console.log(chalk.red(`  ✗ All download methods failed`));
           failedExternalLinks.push(link);
-          console.log(chalk.red('  ✗ All download methods failed'));
         }
       }
     }

@@ -100,12 +100,14 @@ export interface Downloader {
 
 export interface DownloadContext {
   outputDir: string;
+  baseDir?: string;  // Base directory for file operations (may differ from outputDir)
   post: Post;
   fileIndex: number;
   page?: Page;  // Playwright page for browser-based downloaders
   options?: any;
   mediaType?: string;  // 'image', 'video', 'file', etc.
   index?: number;  // Index for filename generation
+  linkName?: string;  // Name of the external link for filename generation
 }
 
 export interface DownloadResult {

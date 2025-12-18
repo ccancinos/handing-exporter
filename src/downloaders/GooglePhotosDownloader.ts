@@ -10,6 +10,7 @@ import { Downloader, DownloadContext, DownloadResult } from '../types.js';
 import { Page } from 'playwright';
 import { downloadMedia } from '../downloader.js';
 import { sleep, parseTimestamp } from '../utils.js';
+import { getMediaFilePath } from '../file-organizer.js';
 import { extname } from 'path';
 
 export class GooglePhotosDownloader implements Downloader {
@@ -135,8 +136,11 @@ export class GooglePhotosDownloader implements Downloader {
       const downloadPromises = mediaUrls.map((media, i) => {
         return limit(async () => {
           const filename = this.generateFilename(context, i, media.type);
-          const filePath = `${context.outputDir}/${filename}`;
-          
+
+          // Use getMediaFilePath to auto-route based on file extension
+          const baseDir = context.baseDir || context.outputDir;
+          const filePath = getMediaFilePath(baseDir, context.post, filename);
+
           console.log(`  [${i + 1}/${mediaUrls.length}] Downloading ${media.type}: ${filename}`);
           const result = await downloadMedia(media.url, filePath, { maxRetries: 3, timeout: 45000 });
 

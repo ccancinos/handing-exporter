@@ -147,23 +147,53 @@ export async function downloadExternalLink(url: string, filePath: string, option
 }
 
 function getExtensionFromContentType(contentType: string): string {
-  const mimeToExt = {
+  const mimeToExt: Record<string, string> = {
+    // Documents
     'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.ms-word': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+
+    // Images
     'image/jpeg': 'jpg',
     'image/jpg': 'jpg',
     'image/png': 'png',
     'image/gif': 'gif',
     'image/webp': 'webp',
+    'image/svg+xml': 'svg',
+    'image/bmp': 'bmp',
+    'image/tiff': 'tiff',
+
+    // Videos
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
     'video/x-msvideo': 'avi',
     'video/webm': 'webm',
+    'video/mpeg': 'mpeg',
+    'video/x-matroska': 'mkv',
+
+    // Archives
     'application/zip': 'zip',
     'application/x-zip-compressed': 'zip',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-    'application/msword': 'doc',
-    'application/vnd.ms-excel': 'xls'
+    'application/x-rar-compressed': 'rar',
+    'application/x-7z-compressed': '7z',
+    'application/gzip': 'gz',
+
+    // Text/HTML (for cases where HTML is the actual content we want to save)
+    'text/html': 'html',
+    'application/xhtml+xml': 'html',
+    'text/plain': 'txt',
+    'text/csv': 'csv',
+    'application/json': 'json',
+    'application/xml': 'xml',
+    'text/xml': 'xml',
+
+    // Other common types
+    'application/octet-stream': 'bin'
   };
 
   // Extract base type without parameters

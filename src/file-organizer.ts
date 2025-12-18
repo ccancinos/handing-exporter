@@ -98,7 +98,7 @@ function detectFileType(filename) {
  * @param {string} [mediaType] - Optional: 'Images', 'Videos', or 'External_Files'. Auto-detected if omitted.
  * @returns {string} Full file path
  */
-export function getMediaFilePath(baseDir, post, filename, mediaType) {
+export function getMediaFilePath(baseDir, post, filename, mediaType?) {
   // Auto-detect mediaType from file extension if not provided
   if (!mediaType && filename) {
     mediaType = detectFileType(filename);

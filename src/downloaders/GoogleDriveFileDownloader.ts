@@ -107,26 +107,40 @@ export class GoogleDriveFileDownloader implements Downloader {
       console.log('  Constructing direct download URL...');
       const directDownloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0&confirm=t`;
 
-      // Generate the proper filename
+      // Generate the proper filename with smart extension handling
       let filename: string;
+      const date = parseTimestamp(context.post.timestamp);
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hour = String(date.getHours()).padStart(2, '0');
+      const minute = String(date.getMinutes()).padStart(2, '0');
+      const timestamp = `${month}-${day}-${hour}-${minute}`;
+
       if (actualFilename) {
-        // Ensure the filename has the correct extension if we know the content type
-        if (contentType && !actualFilename.toLowerCase().endsWith(`.${contentType.toLowerCase()}`)) {
-          actualFilename = `${actualFilename}.${contentType}`;
+        // Strip any existing extension from the filename to avoid doubles
+        let baseFilename = actualFilename;
+        const lastDotIndex = actualFilename.lastIndexOf('.');
+        if (lastDotIndex > 0) {
+          const possibleExt = actualFilename.substring(lastDotIndex + 1).toLowerCase();
+          // Only strip if it looks like a real extension (2-5 chars, alphanumeric)
+          if (possibleExt.length >= 2 && possibleExt.length <= 5 && /^[a-z0-9]+$/.test(possibleExt)) {
+            baseFilename = actualFilename.substring(0, lastDotIndex);
+            // If we didn't detect a content type, use the extension from filename
+            if (!contentType) {
+              contentType = possibleExt;
+            }
+          }
         }
-        const sanitizedName = actualFilename.replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 100);
-        const date = parseTimestamp(context.post.timestamp);
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-        const hour = String(date.getHours()).padStart(2, '0');
-        const minute = String(date.getMinutes()).padStart(2, '0');
-        const timestamp = `${month}-${day}-${hour}-${minute}`;
-        filename = `${timestamp}-${sanitizedName}`;
+
+        const sanitizedName = baseFilename.replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 100);
+
+        // Always ensure we have an extension
+        const extension = contentType || 'pdf'; // Default to PDF for Google Drive files
+        filename = `${timestamp}-${sanitizedName}.${extension}`;
       } else {
-        filename = this.generateFilename(context, 0, `drive-file-${fileId}`);
-        if (contentType) {
-          filename = `${filename}.${contentType}`;
-        }
+        // No filename extracted - use file ID with extension
+        const extension = contentType || 'pdf'; // Default to PDF
+        filename = `${timestamp}-drive-file-${fileId}.${extension}`;
       }
 
       // Use getMediaFilePath to auto-route based on file extension
@@ -204,14 +218,28 @@ export class GoogleDriveFileDownloader implements Downloader {
             // Get suggested filename and update if better than our default
             const suggestedFilename = await download.suggestedFilename();
             if (suggestedFilename && !actualFilename) {
+              // Strip extension from suggested filename to avoid doubles
+              let baseName = suggestedFilename;
+              let detectedExt = '';
+              const lastDot = suggestedFilename.lastIndexOf('.');
+              if (lastDot > 0) {
+                const ext = suggestedFilename.substring(lastDot + 1).toLowerCase();
+                if (ext.length >= 2 && ext.length <= 5 && /^[a-z0-9]+$/.test(ext)) {
+                  baseName = suggestedFilename.substring(0, lastDot);
+                  detectedExt = ext;
+                }
+              }
+
               const date = parseTimestamp(context.post.timestamp);
               const month = String(date.getMonth() + 1).padStart(2, '0');
               const day = String(date.getDate()).padStart(2, '0');
               const hour = String(date.getHours()).padStart(2, '0');
               const minute = String(date.getMinutes()).padStart(2, '0');
               const timestamp = `${month}-${day}-${hour}-${minute}`;
-              const sanitized = suggestedFilename.replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 100);
-              filename = `${timestamp}-${sanitized}`;
+              const sanitized = baseName.replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 100);
+
+              const finalExt = detectedExt || contentType || 'pdf';
+              filename = `${timestamp}-${sanitized}.${finalExt}`;
             }
 
             const finalPath = getMediaFilePath(baseDir, context.post, filename);

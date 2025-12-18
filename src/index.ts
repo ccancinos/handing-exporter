@@ -37,7 +37,7 @@ import {
   getAvatarFilePath,
   generateAvatarFilename
 } from './file-organizer.js';
-import { downloadMedia, downloadExternalLink, downloadAvatarsBatch } from './downloader.js';
+import { downloadMedia, downloadExternalLink, downloadAvatarsBatch, downloadMediaBatch } from './downloader.js';
 import { DownloaderFactory } from './downloaders/index.js';
 import {
   generatePostMarkdown,
@@ -219,48 +219,67 @@ async function main() {
           await createPostDirectories(config.outputDir, enrichedPost);
 
           // Download images (separate arrays for post images vs gallery images)
+          // Filter out videos - they'll be handled in the video section below
           const imageFilenames = [];
           const galleryImages = []; // Track gallery images separately with source info
-          if (enrichedPost.images && enrichedPost.images.length > 0) {
-            console.log(chalk.gray(`      → Downloading ${enrichedPost.images.length} images...`));
-          }
-          for (let j = 0; j < enrichedPost.images.length; j++) {
-            const imageUrl = enrichedPost.images[j];
-            const filename = generateMediaFilename(enrichedPost, imageUrl, 'image', j);
-            const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename, 'Images');
+          const imageUrls = enrichedPost.images ? enrichedPost.images.filter(url =>
+            typeof url === 'string' && !url.match(/\.(mp4|mov|avi|webm|m4v)(\?|$)/i)
+          ) : [];
 
-            const result = await downloadMedia(imageUrl, filePath);
-            if (result.status === 'success') {
-              imageFilenames.push(filename);
-              downloadedImages++;
-            } else {
-              console.error(chalk.red(`     ✗ Failed to download image ${i + 1}: ${result.error}`));
-              failedDownloads++;
-            }
+          if (imageUrls.length > 0) {
+            console.log(chalk.gray(`      → Downloading ${imageUrls.length} images in parallel...`));
+
+            // Prepare batch download items
+            const imageBatchItems = imageUrls.map((url, j) => {
+              const filename = generateMediaFilename(enrichedPost, url, 'image', j);
+              const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename, 'Images');
+              return { url, filePath, filename };
+            });
+
+            // Download in parallel
+            const imageResults = await downloadMediaBatch(imageBatchItems, { concurrency: 5 });
+
+            // Process results
+            imageResults.forEach((result, j) => {
+              if (result.status === 'success') {
+                imageFilenames.push(imageBatchItems[j].filename);
+                downloadedImages++;
+              } else {
+                console.error(chalk.red(`     ✗ Failed to download image ${j + 1}: ${result.error}`));
+                failedDownloads++;
+              }
+            });
           }
 
           // Download videos (extract video URLs from images array)
           const videoFilenames = [];
-          const videoUrls = enrichedPost.images.filter(url =>
+          const videoUrls = enrichedPost.images ? enrichedPost.images.filter(url =>
             typeof url === 'string' && url.match(/\.(mp4|mov|avi|webm|m4v)(\?|$)/i)
-          );
+          ) : [];
 
           if (videoUrls.length > 0) {
-            console.log(chalk.gray(`      → Downloading ${videoUrls.length} videos...`));
-          }
-          for (let j = 0; j < videoUrls.length; j++) {
-            const videoUrl = videoUrls[j];
-            const filename = generateMediaFilename(enrichedPost, videoUrl, 'video', j);
-            const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename, 'Videos');
+            console.log(chalk.gray(`      → Downloading ${videoUrls.length} videos in parallel...`));
 
-            const result = await downloadMedia(videoUrl, filePath);
-            if (result.status === 'success') {
-              videoFilenames.push(filename);
-              downloadedVideos++;
-            } else {
-              console.error(chalk.red(`     ✗ Failed to download video ${i + 1}: ${result.error}`));
-              failedDownloads++;
-            }
+            // Prepare batch download items
+            const videoBatchItems = videoUrls.map((url, j) => {
+              const filename = generateMediaFilename(enrichedPost, url, 'video', j);
+              const filePath = getMediaFilePath(config.outputDir, enrichedPost, filename, 'Videos');
+              return { url, filePath, filename };
+            });
+
+            // Download in parallel
+            const videoResults = await downloadMediaBatch(videoBatchItems, { concurrency: 5 });
+
+            // Process results
+            videoResults.forEach((result, j) => {
+              if (result.status === 'success') {
+                videoFilenames.push(videoBatchItems[j].filename);
+                downloadedVideos++;
+              } else {
+                console.error(chalk.red(`     ✗ Failed to download video ${j + 1}: ${result.error}`));
+                failedDownloads++;
+              }
+            });
           }
 
           // Download external links (including galleries) with deduplication
@@ -293,6 +312,13 @@ async function main() {
                 console.log(chalk.gray(`       Downloader: ${downloader ? downloader.constructor.name : 'null'}`));
                 console.log(chalk.gray(`       Is gallery: ${isGallery}`));
                 console.log(chalk.gray(`       Galleries enabled: ${galleriesEnabled}`));
+
+                // Check if no downloader can handle this URL (filtered out as non-downloadable)
+                if (!downloader) {
+                  console.log(chalk.yellow(`     ⚠ Non-downloadable URL (web page, form, etc.): ${link.name}`));
+                  failedExternalLinks.push(link);
+                  continue;
+                }
 
                 // STRATEGY 1: Try gallery downloader if detected
                 if (isGallery && galleriesEnabled) {
@@ -341,32 +367,36 @@ async function main() {
                 }
 
                 // STRATEGY 2: Try direct file download (as primary or fallback)
-                if (!downloadSuccessful) {
-                  const tempFilename = generateExternalFileFilename(enrichedPost, link, j, 'tmp');
-                  const tempFilePath = getExternalFilePath(config.outputDir, enrichedPost, tempFilename);
+                if (!downloadSuccessful && downloader && downloader.getPriority() === 0) {
+                  console.log(chalk.gray(`     → Attempting direct file download: ${link.name}`));
 
-                  const result = await downloadExternalLink(link.url, tempFilePath, { timeout: 40000 });
-
-                  if (result.status === 'success') {
-                    const finalFilename = generateExternalFileFilename(enrichedPost, link, j, result.extension);
-                    const finalFilePath = getExternalFilePath(config.outputDir, enrichedPost, finalFilename);
-
-                    if (finalFilename !== tempFilename) {
-                      const fs = await import('fs/promises');
-                      await fs.rename(tempFilePath, finalFilePath);
-                    }
-
-                    downloadedExternalFiles.push({
-                      name: link.name,
-                      url: link.url,
-                      filename: finalFilename
+                  try {
+                    const results = await downloader.download(link.url, {
+                      outputDir: config.outputDir,
+                      baseDir: config.outputDir,
+                      post: enrichedPost,
+                      fileIndex: j,
+                      linkName: link.name,  // Pass link name for filename generation
+                      page
                     });
 
-                    const method = isGallery ? 'fallback direct download' : 'direct download';
-                    console.log(chalk.green(`     ✓ Downloaded via ${method}: ${link.name} (${result.extension})`));
-                    downloadSuccessful = true;
-                  } else {
-                    console.log(chalk.yellow(`     ⚠ Direct download failed: ${link.name} - ${result.error}`));
+                    // Process direct download result
+                    if (results.length > 0 && results[0].status === 'success') {
+                      const result = results[0];
+                      downloadedExternalFiles.push({
+                        name: link.name,
+                        url: link.url,
+                        filename: result.filename
+                      });
+
+                      const method = isGallery ? 'fallback direct download' : 'direct download';
+                      console.log(chalk.green(`     ✓ Downloaded via ${method}: ${link.name}`));
+                      downloadSuccessful = true;
+                    } else if (results.length > 0) {
+                      console.log(chalk.yellow(`     ⚠ Direct download failed: ${link.name} - ${results[0].error}`));
+                    }
+                  } catch (directError) {
+                    console.log(chalk.yellow(`     ⚠ Direct download error: ${directError.message}`));
                   }
                 }
 
