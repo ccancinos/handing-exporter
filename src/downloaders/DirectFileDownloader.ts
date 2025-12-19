@@ -58,6 +58,7 @@ export class DirectFileDownloader implements Downloader {
 
     // Interactive web applications
     if (lowerUrl.includes('padlet.com/') ||
+        lowerUrl.includes('plataforma.acadeu.com/') ||
         lowerUrl.includes('forms.google.com/') ||
         lowerUrl.includes('docs.google.com/forms/')) {
       return true;

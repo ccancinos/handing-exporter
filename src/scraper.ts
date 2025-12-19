@@ -319,7 +319,7 @@ export async function extractAllPosts(page, context, config, groupUrl) {
   // Phase 2: Parallel extraction of remaining pages in batches
   console.log('  → Multiple pages detected, using parallel batch extraction...');
 
-  const BATCH_SIZE = 10; // Process 10 pages concurrently
+  const BATCH_SIZE = 5; // Process 5 pages concurrently (reduced from 10 to prevent network throttling)
   const MAX_PAGES = 500; // Safety limit (stop if we exceed this)
   let currentPage = 2;
   let consecutiveEmptyBatches = 0;
@@ -361,19 +361,21 @@ export async function extractAllPosts(page, context, config, groupUrl) {
 
     // Stop if entire batch was empty
     if (emptyPagesInBatch === BATCH_SIZE) {
-      consecutiveEmptyBatches++;
-      if (consecutiveEmptyBatches >= 1) {
-        console.log('  ✓ Reached end of timeline (empty batch detected)');
-        break;
-      }
-    } else {
-      consecutiveEmptyBatches = 0;
+      console.log('  ✓ Reached end of timeline (empty batch detected)');
+      break;
     }
 
-    // Stop if we found any empty pages (likely near the end)
-    if (emptyPagesInBatch > 0) {
-      console.log('  ✓ Reached end of timeline (partial empty batch)');
+    // Stop if majority of batch was empty (likely at the end, but allow some network errors)
+    if (emptyPagesInBatch >= BATCH_SIZE * 0.6) {
+      console.log(`  ✓ Reached end of timeline (${emptyPagesInBatch}/${BATCH_SIZE} pages empty)`);
       break;
+    }
+
+    // If we found some posts, reset and continue
+    if (postsFoundInBatch > 0) {
+      consecutiveEmptyBatches = 0;
+    } else {
+      consecutiveEmptyBatches++;
     }
 
     currentPage += BATCH_SIZE;

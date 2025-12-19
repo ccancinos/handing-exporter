@@ -164,35 +164,59 @@ async function main() {
       let failedDownloads = 0;
       const failedPosts = [];
 
-      for (let i = 0; i < posts.length; i++) {
-        const post = posts[i];
+      // Create page pool for parallel post enrichment
+      console.log(chalk.gray('   Creating page pool for parallel processing...'));
+      const CONCURRENT_POSTS = 1; // Process posts sequentially (reduced from 5 for stability)
+      const pagePool: any[] = [];
 
-        // Resume logic: Skip already completed posts (but verify file exists)
-        if (isPostComplete(manifest, post.id)) {
-          // Verify the markdown file actually exists
-          const manifestPost = manifest.posts[post.id];
-          if (manifestPost.markdown_path) {
-            const fs = await import('fs/promises');
-            try {
-              await fs.access(manifestPost.markdown_path);
-              // File exists, safe to skip
-              skippedCount++;
-              console.log(chalk.gray(`   [${i + 1}/${posts.length}] ✓ Skipping completed: ${post.title || post.id}`));
-              continue;
-            } catch (err) {
-              // File doesn't exist, need to re-process
-              console.log(chalk.yellow(`   [${i + 1}/${posts.length}] ⚠ Manifest says complete but file missing, re-processing...`));
+      for (let i = 0; i < CONCURRENT_POSTS; i++) {
+        const newPage = await context.newPage();
+        pagePool.push(newPage);
+      }
+      console.log(chalk.green(`   ✓ Created ${CONCURRENT_POSTS} page(s) for processing\n`));
+
+      // Use p-limit for concurrent post processing
+      const pLimit = (await import('p-limit')).default;
+      const postLimit = pLimit(CONCURRENT_POSTS);
+      const globalGalleryLimit = pLimit(1); // GLOBAL: Only 1 gallery download at a time across ALL posts
+      let currentPageIndex = 0;
+
+      // Process all posts in parallel
+      const postProcessingPromises = posts.map((post, i) =>
+        postLimit(async () => {
+          // Get a page from the pool (round-robin)
+          const pageIndex = currentPageIndex++ % CONCURRENT_POSTS;
+          const postPage = pagePool[pageIndex];
+
+          // Resume logic: Skip already completed posts (but verify file exists)
+          if (isPostComplete(manifest, post.id)) {
+            // Verify the markdown file actually exists
+            const manifestPost = manifest.posts[post.id];
+            if (manifestPost.markdown_path) {
+              const fs = await import('fs/promises');
+              try {
+                await fs.access(manifestPost.markdown_path);
+                // File exists, safe to skip
+                skippedCount++;
+                console.log(chalk.gray(`   [${i + 1}/${posts.length}] ✓ Skipping completed: ${post.title || post.id}`));
+                return;
+              } catch (err) {
+                // File doesn't exist, need to re-process
+                console.log(chalk.yellow(`   [${i + 1}/${posts.length}] ⚠ Manifest says complete but file missing, re-processing...`));
+              }
             }
           }
-        }
 
-        processedCount++;
-        console.log(chalk.blue(`\n   📝 [${i + 1}/${posts.length}] Processing: ${post.title || post.id}`));
+          processedCount++;
+          console.log(chalk.blue(`\n   📝 [${i + 1}/${posts.length}] Processing: ${post.title || post.id}`));
 
-        try {
-          // STEP 1: Enrich post with full details
-          console.log(chalk.gray(`      → Extracting full post details...`));
-          const enrichedPost = await enrichSinglePost(page, post, config);
+          // Reset per-post failure counter
+          let postFailedDownloads = 0;
+
+          try {
+            // STEP 1: Enrich post with full details
+            console.log(chalk.gray(`      → Extracting full post details...`));
+            const enrichedPost = await enrichSinglePost(postPage, post, config);
           console.log(chalk.green(`      ✓ Extracted content (${enrichedPost.content?.length || 0} chars)`));
           console.log(chalk.gray(`      ✓ Found ${enrichedPost.comments?.length || 0} comments`));
           console.log(chalk.gray(`      ✓ Found ${enrichedPost.externalLinks?.length || 0} external links`));
@@ -246,7 +270,7 @@ async function main() {
                 downloadedImages++;
               } else {
                 console.error(chalk.red(`     ✗ Failed to download image ${j + 1}: ${result.error}`));
-                failedDownloads++;
+                postFailedDownloads++;
               }
             });
           }
@@ -277,7 +301,7 @@ async function main() {
                 downloadedVideos++;
               } else {
                 console.error(chalk.red(`     ✗ Failed to download video ${j + 1}: ${result.error}`));
-                failedDownloads++;
+                postFailedDownloads++;
               }
             });
           }
@@ -288,129 +312,142 @@ async function main() {
           const processedUrls = new Set(); // Track URLs we've already processed (safety net)
 
           if (enrichedPost.externalLinks && enrichedPost.externalLinks.length > 0) {
-            console.log(chalk.gray(`      → Downloading ${enrichedPost.externalLinks.length} external links/galleries...`));
+            console.log(chalk.gray(`      → Downloading ${enrichedPost.externalLinks.length} external links/galleries in parallel...`));
 
-            for (let j = 0; j < enrichedPost.externalLinks.length; j++) {
-              const link = enrichedPost.externalLinks[j];
+            // Import p-limit for concurrency control
+            const pLimit = (await import('p-limit')).default;
+            const externalLinksLimit = pLimit(3); // Process 3 external links concurrently
+            // Note: Using globalGalleryLimit (defined at post-processing level) to prevent page conflicts
 
-              // Skip if we've already processed this URL (deduplication safety net)
-              if (processedUrls.has(link.url)) {
-                console.log(chalk.gray(`     → Skipping duplicate URL: ${link.name}`));
-                continue;
-              }
-              processedUrls.add(link.url);
+            // Process all external links in parallel
+            const externalLinkPromises = enrichedPost.externalLinks.map((link, j) =>
+              externalLinksLimit(async () => {
 
-              try {
-                // Check if this is a gallery link and galleries are enabled
-                const downloader = downloaderFactory.getDownloader(link.url);
-                const isGallery = downloader && downloader.getPriority && downloader.getPriority() > 0;
-                const galleriesEnabled = config.downloaders?.enableGalleries !== false;
-                let downloadSuccessful = false;
-
-                // DEBUG: Log downloader detection
-                console.log(chalk.gray(`     → Analyzing link: ${link.url}`));
-                console.log(chalk.gray(`       Downloader: ${downloader ? downloader.constructor.name : 'null'}`));
-                console.log(chalk.gray(`       Is gallery: ${isGallery}`));
-                console.log(chalk.gray(`       Galleries enabled: ${galleriesEnabled}`));
-
-                // Check if no downloader can handle this URL (filtered out as non-downloadable)
-                if (!downloader) {
-                  console.log(chalk.yellow(`     ⚠ Non-downloadable URL (web page, form, etc.): ${link.name}`));
-                  failedExternalLinks.push(link);
-                  continue;
+                // Skip if we've already processed this URL (deduplication safety net)
+                if (processedUrls.has(link.url)) {
+                  console.log(chalk.gray(`     → Skipping duplicate URL: ${link.name}`));
+                  return;
                 }
+                processedUrls.add(link.url);
 
-                // STRATEGY 1: Try gallery downloader if detected
-                if (isGallery && galleriesEnabled) {
-                  console.log(chalk.cyan(`         → Gallery detected: ${link.name}`));
-                  const imagesDir = getMediaFilePath(config.outputDir, enrichedPost, '', 'Images').replace(/\/?$/, '');
+                try {
+                  // Check if this is a gallery link and galleries are enabled
+                  const downloader = downloaderFactory.getDownloader(link.url);
+                  const isGallery = downloader && downloader.getPriority && downloader.getPriority() > 0;
+                  const galleriesEnabled = config.downloaders?.enableGalleries !== false;
+                  let downloadSuccessful = false;
 
-                  try {
-                    const results = await downloader.download(link.url, {
-                      outputDir: imagesDir,
-                      baseDir: config.outputDir,  // For getMediaFilePath calls
-                      post: enrichedPost,
-                      fileIndex: j,
-                      page
-                    });
+                  // DEBUG: Log downloader detection
+                  console.log(chalk.gray(`     → Analyzing link: ${link.url}`));
+                  console.log(chalk.gray(`       Downloader: ${downloader ? downloader.constructor.name : 'null'}`));
+                  console.log(chalk.gray(`       Is gallery: ${isGallery}`));
+                  console.log(chalk.gray(`       Galleries enabled: ${galleriesEnabled}`));
 
-                    // Process gallery results - add to separate galleryImages array
-                    let successCount = 0;
-                    const currentGalleryImages = [];
-                    for (const result of results) {
-                      if (result.status === 'success') {
-                        downloadedImages++;
-                        currentGalleryImages.push(result.filename);
-                        successCount++;
-                        console.log(chalk.green(`       ✓ Downloaded from gallery: ${result.filename}`));
-                      } else {
-                        console.log(chalk.yellow(`       ⚠ Failed: ${result.error}`));
+                  // Check if no downloader can handle this URL (filtered out as non-downloadable)
+                  if (!downloader) {
+                    console.log(chalk.yellow(`     ⚠ Non-downloadable URL (web page, form, etc.): ${link.name}`));
+                    failedExternalLinks.push(link);
+                    return;
+                  }
+
+                  // STRATEGY 1: Try gallery downloader if detected
+                  if (isGallery && galleriesEnabled) {
+                    console.log(chalk.cyan(`         → Gallery detected: ${link.name}`));
+                    const imagesDir = getMediaFilePath(config.outputDir, enrichedPost, '', 'Images').replace(/\/?$/, '');
+
+                    try {
+                      // Use GLOBAL gallery semaphore to prevent page conflicts across ALL posts
+                      const results = await globalGalleryLimit(async () => {
+                        return await downloader.download(link.url, {
+                          outputDir: imagesDir,
+                          baseDir: config.outputDir,  // For getMediaFilePath calls
+                          post: enrichedPost,
+                          fileIndex: j,
+                          page: postPage
+                        });
+                      });
+
+                      // Process gallery results - add to separate galleryImages array
+                      let successCount = 0;
+                      const currentGalleryImages = [];
+                      for (const result of results) {
+                        if (result.status === 'success') {
+                          downloadedImages++;
+                          currentGalleryImages.push(result.filename);
+                          successCount++;
+                          console.log(chalk.green(`       ✓ Downloaded from gallery: ${result.filename}`));
+                        } else {
+                          console.log(chalk.yellow(`       ⚠ Failed: ${result.error}`));
+                        }
                       }
-                    }
 
-                    if (successCount > 0) {
-                      // Add gallery with its source URL and images
-                      galleryImages.push({
-                        sourceUrl: link.url,
-                        sourceName: link.name,
-                        images: currentGalleryImages
-                      });
-                      console.log(chalk.green(`     ✓ Gallery downloaded: ${successCount} images from ${link.name}`));
-                      downloadSuccessful = true;
-                    } else {
-                      console.log(chalk.yellow(`     ⚠ Gallery extraction failed, will try direct download as fallback...`));
+                      if (successCount > 0) {
+                        // Add gallery with its source URL and images
+                        galleryImages.push({
+                          sourceUrl: link.url,
+                          sourceName: link.name,
+                          images: currentGalleryImages
+                        });
+                        console.log(chalk.green(`     ✓ Gallery downloaded: ${successCount} images from ${link.name}`));
+                        downloadSuccessful = true;
+                      } else {
+                        console.log(chalk.yellow(`     ⚠ Gallery extraction failed, will try direct download as fallback...`));
+                      }
+                    } catch (galleryError) {
+                      console.log(chalk.yellow(`     ⚠ Gallery downloader error: ${galleryError.message}`));
+                      console.log(chalk.gray(`     → Attempting fallback to direct file download...`));
                     }
-                  } catch (galleryError) {
-                    console.log(chalk.yellow(`     ⚠ Gallery downloader error: ${galleryError.message}`));
-                    console.log(chalk.gray(`     → Attempting fallback to direct file download...`));
                   }
-                }
 
-                // STRATEGY 2: Try direct file download (as primary or fallback)
-                if (!downloadSuccessful && downloader && downloader.getPriority() === 0) {
-                  console.log(chalk.gray(`     → Attempting direct file download: ${link.name}`));
+                  // STRATEGY 2: Try direct file download (as primary or fallback)
+                  if (!downloadSuccessful && downloader && downloader.getPriority() === 0) {
+                    console.log(chalk.gray(`     → Attempting direct file download: ${link.name}`));
 
-                  try {
-                    const results = await downloader.download(link.url, {
-                      outputDir: config.outputDir,
-                      baseDir: config.outputDir,
-                      post: enrichedPost,
-                      fileIndex: j,
-                      linkName: link.name,  // Pass link name for filename generation
-                      page
-                    });
-
-                    // Process direct download result
-                    if (results.length > 0 && results[0].status === 'success') {
-                      const result = results[0];
-                      downloadedExternalFiles.push({
-                        name: link.name,
-                        url: link.url,
-                        filename: result.filename
+                    try {
+                      const results = await downloader.download(link.url, {
+                        outputDir: config.outputDir,
+                        baseDir: config.outputDir,
+                        post: enrichedPost,
+                        fileIndex: j,
+                        linkName: link.name,  // Pass link name for filename generation
+                        page: postPage
                       });
 
-                      const method = isGallery ? 'fallback direct download' : 'direct download';
-                      console.log(chalk.green(`     ✓ Downloaded via ${method}: ${link.name}`));
-                      downloadSuccessful = true;
-                    } else if (results.length > 0) {
-                      console.log(chalk.yellow(`     ⚠ Direct download failed: ${link.name} - ${results[0].error}`));
-                    }
-                  } catch (directError) {
-                    console.log(chalk.yellow(`     ⚠ Direct download error: ${directError.message}`));
-                  }
-                }
+                      // Process direct download result
+                      if (results.length > 0 && results[0].status === 'success') {
+                        const result = results[0];
+                        downloadedExternalFiles.push({
+                          name: link.name,
+                          url: link.url,
+                          filename: result.filename
+                        });
 
-                // FINAL: Mark as failed if all strategies failed
-                if (!downloadSuccessful) {
+                        const method = isGallery ? 'fallback direct download' : 'direct download';
+                        console.log(chalk.green(`     ✓ Downloaded via ${method}: ${link.name}`));
+                        downloadSuccessful = true;
+                      } else if (results.length > 0) {
+                        console.log(chalk.yellow(`     ⚠ Direct download failed: ${link.name} - ${results[0].error}`));
+                      }
+                    } catch (directError) {
+                      console.log(chalk.yellow(`     ⚠ Direct download error: ${directError.message}`));
+                    }
+                  }
+
+                  // FINAL: Mark as failed if all strategies failed
+                  if (!downloadSuccessful) {
+                    failedExternalLinks.push(link);
+                    console.log(chalk.red(`     ✗ All download strategies failed for: ${link.name}`));
+                  }
+
+                } catch (error) {
                   failedExternalLinks.push(link);
-                  console.log(chalk.red(`     ✗ All download strategies failed for: ${link.name}`));
+                  console.log(chalk.red(`     ✗ Unexpected error downloading: ${link.name} - ${error.message}`));
                 }
+              })
+            );
 
-              } catch (error) {
-                failedExternalLinks.push(link);
-                console.log(chalk.red(`     ✗ Unexpected error downloading: ${link.name} - ${error.message}`));
-              }
-            }
+            // Wait for all external link downloads to complete
+            await Promise.all(externalLinkPromises);
           }
 
           // STEP 3: Generate markdown files
@@ -444,6 +481,13 @@ async function main() {
           }
 
           // STEP 4: Update manifest immediately (streaming!)
+          // Calculate total failures for this post
+          const totalFailures = postFailedDownloads + failedExternalLinks.length;
+          const postStatus = totalFailures > 0 ? 'partial' : 'complete';
+
+          // Update global failure counter for summary
+          failedDownloads += postFailedDownloads;
+
           updatePost(manifest, enrichedPost.id, {
             title: enrichedPost.title,
             url: enrichedPost.url,
@@ -451,11 +495,16 @@ async function main() {
             images_count: imageFilenames.length + galleryImages.reduce((sum, g) => sum + g.images.length, 0),
             videos_count: videoFilenames.length,
             external_links_count: enrichedPost.externalLinks?.length || 0,
-            status: 'complete'
+            failed_downloads: totalFailures,
+            status: postStatus
           });
           await saveManifest(group.name, manifest);
 
-          console.log(chalk.green(`\n   ✅ [${i + 1}/${posts.length}] Completed: ${enrichedPost.title || enrichedPost.id}\n`));
+          if (postStatus === 'partial') {
+            console.log(chalk.yellow(`\n   ⚠️ [${i + 1}/${posts.length}] Partial (${totalFailures} failures - will retry): ${enrichedPost.title || enrichedPost.id}\n`));
+          } else {
+            console.log(chalk.green(`\n   ✅ [${i + 1}/${posts.length}] Completed: ${enrichedPost.title || enrichedPost.id}\n`));
+          }
 
         } catch (error: any) {
           console.error(chalk.red(`\n   ❌ [${i + 1}/${posts.length}] Failed: ${post.title || post.id}`));
@@ -480,9 +529,22 @@ async function main() {
           });
 
           // Continue to next post (don't crash)
-          continue;
+          // No need for return - function will complete automatically
         }
-      }
+      })
+    );
+
+    // Wait for all posts to be processed
+    console.log(chalk.blue('\n   ⏳ Waiting for all posts to complete...'));
+    await Promise.all(postProcessingPromises);
+    console.log(chalk.green('   ✅ All posts processed!\n'));
+
+    // Close page pool
+    console.log(chalk.gray('   Closing page pool...'));
+    for (const poolPage of pagePool) {
+      await poolPage.close();
+    }
+    console.log(chalk.green('   ✓ Page pool closed\n'));
 
       // Phase 4.5: Download comment avatars collected during processing
       if (commentAuthorsMap.size > 0) {
@@ -523,11 +585,15 @@ async function main() {
       }
 
       // Summary
+      const finalStats = getManifestStats(manifest);
       console.log(chalk.green(`\n   📊 Phase 3-4 Complete:`));
       console.log(chalk.gray(`   Total posts: ${posts.length}`));
       console.log(chalk.gray(`   Skipped (already complete): ${skippedCount}`));
       console.log(chalk.gray(`   Processed: ${processedCount}`));
       console.log(chalk.gray(`   Failed: ${failedPosts.length}`));
+      if (finalStats.partial > 0) {
+        console.log(chalk.yellow(`   Partial (will retry next run): ${finalStats.partial}`));
+      }
       console.log(chalk.gray(`   Downloaded: ${downloadedImages} images, ${downloadedVideos} videos`));
 
       // Save debug file if there were failures

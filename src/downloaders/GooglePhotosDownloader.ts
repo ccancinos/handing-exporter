@@ -70,7 +70,7 @@ export class GooglePhotosDownloader implements Downloader {
           document.querySelectorAll('.rtIMgb').forEach(itemEl => {
             const linkEl = itemEl.querySelector('a.p137Zd');
             const styleEl = itemEl.querySelector('div[style*="background-image"]');
-            
+
             if (linkEl && styleEl) {
               const ariaLabel = linkEl.getAttribute('aria-label') || '';
               const style = (styleEl as HTMLElement).style.backgroundImage;
@@ -105,23 +105,23 @@ export class GooglePhotosDownloader implements Downloader {
             break;
           }
         }
-        
+
         await this.page.mouse.wheel(0, 1000); // Gentle scroll
         await sleep(scrollDelay);
         scrollAttempts++;
       }
       console.log(`\n✅ Scrolling complete. Found ${allMedia.size} total media items.`);
-      
+
       const mediaUrls = Array.from(allMedia.entries()).map(([u, type]) => {
         const baseUrl = u.split('=')[0];
-        return { 
-          url: baseUrl + (type === 'video' ? '=dv' : '=d'), 
+        return {
+          url: baseUrl + (type === 'video' ? '=dv' : '=d'),
           type
         };
       });
-      
+
       console.log(`Found ${mediaUrls.length} unique media items after processing.`);
-      
+
       if (mediaUrls.length === 0) {
         const html = await this.page.content();
         const debugFile = `debug-google-photos-no-media-${Date.now()}.html`;
@@ -132,7 +132,7 @@ export class GooglePhotosDownloader implements Downloader {
       }
 
       console.log(`\n📥 Starting parallel download of ${mediaUrls.length} items (concurrency: 5)...`);
-      const limit = pLimit(5);
+      const limit = pLimit(10);
       const downloadPromises = mediaUrls.map((media, i) => {
         return limit(async () => {
           const filename = this.generateFilename(context, i, media.type);
@@ -161,7 +161,7 @@ export class GooglePhotosDownloader implements Downloader {
       return [{ status: 'failed', url, error: error.message }];
     }
   }
-  
+
   private generateFilename(context: DownloadContext, index: number, mediaType: 'image' | 'video' = 'image'): string {
     const { post } = context;
     const date = parseTimestamp(post.timestamp);

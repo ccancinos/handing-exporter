@@ -153,7 +153,7 @@ export class GoogleDriveFileDownloader implements Downloader {
       // Use Playwright's authenticated request context to download the file
       // This ensures we have the necessary cookies for Google Drive access
       try {
-        const response = await this.page.request.get(directDownloadUrl);
+        const response = await this.page.request.get(directDownloadUrl, { timeout: 120000 });
 
         if (response.ok()) {
           // Save the file
@@ -204,7 +204,7 @@ export class GoogleDriveFileDownloader implements Downloader {
             console.log('  ✓ Detected virus scan warning page (large file >100MB)');
 
             // Set up download listener on the new page
-            const newPageDownloadPromise = newPage.waitForEvent('download', { timeout: 90000 });
+            const newPageDownloadPromise = newPage.waitForEvent('download', { timeout: 180000 });
 
             // Click "Download anyway" button
             const downloadButton = newPage.locator('#uc-download-link[type="submit"]');
