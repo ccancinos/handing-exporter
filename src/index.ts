@@ -330,6 +330,12 @@ async function main() {
                 }
                 processedUrls.add(link.url);
 
+                // Skip non-downloadable URL schemes (mailto, tel, etc.)
+                if (link.url.match(/^(mailto|tel|sms|skype):/i)) {
+                  console.log(chalk.gray(`     → Skipping non-downloadable URL scheme: ${link.url.split(':')[0]}:// (${link.name})`));
+                  return;
+                }
+
                 try {
                   // Check if this is a gallery link and galleries are enabled
                   const downloader = downloaderFactory.getDownloader(link.url);

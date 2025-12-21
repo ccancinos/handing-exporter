@@ -180,6 +180,12 @@ async function testSinglePost() {
       for (let i = 0; i < enrichedPost.externalLinks.length; i++) {
         const link = enrichedPost.externalLinks[i];
 
+        // Skip non-downloadable URL schemes (mailto, tel, etc.)
+        if (link.url.match(/^(mailto|tel|sms|skype):/i)) {
+          console.log(chalk.gray(`\n  ⚠ Skipping non-downloadable URL scheme: ${link.url.split(':')[0]}://`));
+          continue;
+        }
+
         console.log(chalk.cyan(`\n  [${i + 1}/${enrichedPost.externalLinks.length}] ${link.name || link.url}`));
         console.log(chalk.gray(`  URL: ${link.url}`));
 

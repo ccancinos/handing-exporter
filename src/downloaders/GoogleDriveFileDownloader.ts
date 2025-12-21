@@ -54,7 +54,8 @@ export class GoogleDriveFileDownloader implements Downloader {
       const fileId = fileIdMatch[1];
 
       // Navigate to the file page to get metadata
-      await this.page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+      // Use 'load' instead of 'networkidle' to avoid waiting for endless analytics/tracking
+      await this.page.goto(url, { waitUntil: 'load', timeout: 120000 });
       await sleep(2000);
 
       // Try to extract the actual filename and content type from the page
